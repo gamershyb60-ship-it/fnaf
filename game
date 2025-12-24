@@ -1,0 +1,402 @@
+pages/Game.jsx
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import MainMenu from '@/components/game/MainMenu';
+import Office from '@/components/game/Office';
+import CameraView from '@/components/game/CameraView';
+import Jumpscare from '@/components/game/Jumpscare';
+import PowerOutage from '@/components/game/PowerOutage';
+import NightComplete from '@/components/game/NightComplete';
+import SoundManager, { useSoundManager } from '@/components/game/SoundManager';
+import AmbientSounds from '@/components/game/AmbientSounds';
+
+const CAMERA_LOCATIONS = {
+  CAM_01: { name: 'Show Stage', x: 50, y: 20 },
+  CAM_02: { name: 'Dining Area', x: 50, y: 40 },
+  CAM_03: { name: 'Pirate Cove', x: 20, y: 35 },
+  CAM_04: { name: 'West Hall', x: 25, y: 55 },
+  CAM_05: { name: 'East Hall', x: 75, y: 55 },
+  CAM_06: { name: 'West Hall Corner', x: 25, y: 75 },
+  CAM_07: { name: 'East Hall Corner', x: 75, y: 75 },
+  CAM_08: { name: 'Supply Closet', x: 35, y: 45 },
+  CAM_09: { name: 'Backstage', x: 65, y: 45 },
+  CAM_10: { name: 'Kitchen', x: 80, y: 35, audioOnly: true },
+  CAM_11: { name: 'Restrooms', x: 35, y: 30 },
+  CAM_12: { name: 'Office', x: 50, y: 90 }
+};
+
+const ANIMATRONIC_PATHS = {
+  freddy: ['CAM_01', 'CAM_02', 'CAM_09', 'CAM_05', 'CAM_07', 'RIGHT_DOOR'],
+  bonnie: ['CAM_01', 'CAM_02', 'CAM_08', 'CAM_04', 'CAM_06', 'LEFT_DOOR'],
+  chica: ['CAM_01', 'CAM_02', 'CAM_10', 'CAM_05', 'CAM_07', 'RIGHT_DOOR'],
+  foxy: ['CAM_03', 'LEFT_DOOR']
+};
+
+const NIGHT_DIFFICULTY = {
+  1: { freddy: 0, bonnie: 15, chica: 15, foxy: 0 },
+  2: { freddy: 20, bonnie: 20, chica: 20, foxy: 27 },
+  3: { freddy: 30, bonnie: 30, chica: 30, foxy: 35 },
+  4: { freddy: 40, bonnie: 40, chica: 40, foxy: 45 },
+  5: { freddy: 55, bonnie: 55, chica: 55, foxy: 60 },
+  6: { freddy: 80, bonnie: 85, chica: 85, foxy: 90 }
+};
+
+export default function Game() {
+  const sounds = useSoundManager();
+  const [gameState, setGameState] = useState('menu');
+  const [currentNight, setCurrentNight] = useState(1);
+  const [unlockedNights, setUnlockedNights] = useState([1]);
+  const [power, setPower] = useState(100);
+  const [hour, setHour] = useState(0);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [currentCamera, setCurrentCamera] = useState('CAM_01');
+  const [leftDoor, setLeftDoor] = useState(false);
+  const [rightDoor, setRightDoor] = useState(false);
+  const [leftLight, setLeftLight] = useState(false);
+  const [rightLight, setRightLight] = useState(false);
+  const [jumpscareAnimatronic, setJumpscareAnimatronic] = useState(null);
+  const [powerOutage, setPowerOutage] = useState(false);
+  const [goldenFreddyInRoom, setGoldenFreddyInRoom] = useState(false);
+  
+  const [animatronics, setAnimatronics] = useState({
+    freddy: { position: 'CAM_01', pathIndex: 0, atDoor: false, doorTimer: 0 },
+    bonnie: { position: 'CAM_01', pathIndex: 0, atDoor: false, doorTimer: 0 },
+    chica: { position: 'CAM_01', pathIndex: 0, atDoor: false, doorTimer: 0 },
+    foxy: { position: 'CAM_03', pathIndex: 0, atDoor: false, doorTimer: 0, chargeLevel: 0 }
+  });
+
+  const gameLoopRef = useRef(null);
+  const aiLoopRef = useRef(null);
+  const foxyLoopRef = useRef(null);
+
+  // Load saved progress
+  useEffect(() => {
+    const saved = localStorage.getItem('fnaf_progress');
+    if (saved) {
+      const data = JSON.parse(saved);
+      setUnlockedNights(data.unlockedNights || [1]);
+    }
+  }, []);
+
+  // Save progress
+  const saveProgress = useCallback((nights) => {
+    localStorage.setItem('fnaf_progress', JSON.stringify({ unlockedNights: nights }));
+  }, []);
+
+  // Start a new night
+  const startNight = useCallback((night) => {
+    setCurrentNight(night);
+    const startingPower = 100 + (night > 1 ? 20 : 0) + (night > 2 ? 10 : 0);
+    setPower(startingPower);
+    setHour(0);
+    setCameraOpen(false);
+    setLeftDoor(false);
+    setRightDoor(false);
+    setLeftLight(false);
+    setRightLight(false);
+    setPowerOutage(false);
+    setJumpscareAnimatronic(null);
+    setAnimatronics({
+      freddy: { position: 'CAM_01', pathIndex: 0, atDoor: false, doorTimer: 0 },
+      bonnie: { position: 'CAM_01', pathIndex: 0, atDoor: false, doorTimer: 0 },
+      chica: { position: 'CAM_01', pathIndex: 0, atDoor: false, doorTimer: 0 },
+      foxy: { position: 'CAM_03', pathIndex: 0, atDoor: false, doorTimer: 0, chargeLevel: 0 }
+    });
+    setGameState('playing');
+  }, []);
+
+  // Power drain and hour progression
+  useEffect(() => {
+    if (gameState !== 'playing' || powerOutage) return;
+
+    gameLoopRef.current = setInterval(() => {
+      let drain = 0.020625;
+      if (leftDoor) drain += 0.104375;
+      if (rightDoor) drain += 0.104375;
+      if (leftLight) drain += 0.0625;
+      if (rightLight) drain += 0.0625;
+      if (cameraOpen) drain += 0.083125;
+
+      setPower(prev => {
+        const newPower = Math.max(0, prev - drain);
+        if (newPower <= 0) {
+          setPowerOutage(true);
+          setLeftDoor(false);
+          setRightDoor(false);
+          setLeftLight(false);
+          setRightLight(false);
+          setCameraOpen(false);
+        }
+        return newPower;
+      });
+
+      setHour(prev => {
+        if (prev >= 6) return prev;
+        const hourSpeed = currentNight === 6 ? 1 / 85 : 1 / 90;
+        return prev + hourSpeed;
+      });
+    }, 1000);
+
+    return () => clearInterval(gameLoopRef.current);
+  }, [gameState, leftDoor, rightDoor, leftLight, rightLight, cameraOpen, powerOutage]);
+
+  // Check for 6 AM
+  useEffect(() => {
+    if (hour >= 6 && gameState === 'playing') {
+      sounds.play6AMSound();
+      setGameState('nightComplete');
+      const newUnlocked = [...new Set([...unlockedNights, currentNight + 1])].filter(n => n <= 6);
+      setUnlockedNights(newUnlocked);
+      saveProgress(newUnlocked);
+    }
+  }, [hour, gameState, currentNight, unlockedNights, saveProgress, sounds]);
+
+  // Power outage - Freddy attack
+  useEffect(() => {
+    if (!powerOutage || gameState !== 'playing') return;
+
+    const timer = setTimeout(() => {
+      setJumpscareAnimatronic('freddy');
+      setGameState('jumpscare');
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, [powerOutage, gameState]);
+
+  // Animatronic AI
+  useEffect(() => {
+    if (gameState !== 'playing' || powerOutage) return;
+
+    const difficulty = NIGHT_DIFFICULTY[currentNight];
+
+    aiLoopRef.current = setInterval(() => {
+      setAnimatronics(prev => {
+        const newState = { ...prev };
+
+        ['freddy', 'bonnie', 'chica'].forEach(name => {
+          const anim = { ...newState[name] };
+          const path = ANIMATRONIC_PATHS[name];
+          const baseChance = difficulty[name] || 0;
+
+          if (anim.atDoor) {
+            anim.doorTimer += 1;
+            const doorClosed = name === 'bonnie' ? leftDoor : rightDoor;
+            
+            if (!doorClosed && anim.doorTimer >= 5) {
+              setJumpscareAnimatronic(name);
+              setGameState('jumpscare');
+            } else if (doorClosed) {
+              const retreatChance = currentNight === 6 ? 5 : 20;
+              if (Math.random() * 100 < retreatChance) {
+                anim.atDoor = false;
+                anim.doorTimer = 0;
+                anim.pathIndex = Math.max(0, anim.pathIndex - 1);
+                anim.position = path[anim.pathIndex];
+              }
+            }
+          } else if (baseChance > 0) {
+            const roll = Math.random() * 100;
+            if (roll < baseChance) {
+              const moveRoll = Math.random() * 100;
+              if (moveRoll < 40 && anim.pathIndex < path.length - 1) {
+                anim.pathIndex += 1;
+                sounds.playStepSound();
+                if (path[anim.pathIndex] === 'LEFT_DOOR' || path[anim.pathIndex] === 'RIGHT_DOOR') {
+                  anim.atDoor = true;
+                  anim.doorTimer = 0;
+                } else {
+                  anim.position = path[anim.pathIndex];
+                }
+              } else if (moveRoll < 50 && anim.pathIndex > 0) {
+                anim.pathIndex -= 1;
+                anim.position = path[anim.pathIndex];
+              }
+            }
+          }
+
+          newState[name] = anim;
+        });
+
+        return newState;
+      });
+    }, 5000);
+
+    return () => clearInterval(aiLoopRef.current);
+  }, [gameState, currentNight, leftDoor, rightDoor, powerOutage]);
+
+  // Golden Freddy random appearance
+  useEffect(() => {
+    if (gameState !== 'playing' || powerOutage) return;
+
+    const checkGoldenFreddy = setInterval(() => {
+      if (Math.random() < 1 / 32768) {
+        setGoldenFreddyInRoom(true);
+        setTimeout(() => setGoldenFreddyInRoom(false), 1000);
+      }
+    }, 5000);
+
+    return () => clearInterval(checkGoldenFreddy);
+  }, [gameState, powerOutage]);
+
+  // Foxy AI
+  useEffect(() => {
+    if (gameState !== 'playing' || currentNight < 2 || powerOutage) return;
+
+    const difficulty = NIGHT_DIFFICULTY[currentNight];
+
+    foxyLoopRef.current = setInterval(() => {
+      setAnimatronics(prev => {
+        const foxy = { ...prev.foxy };
+        const cameraReduction = currentNight === 6 ? 5 : 10;
+        const chance = cameraOpen ? cameraReduction : difficulty.foxy;
+
+        if (foxy.atDoor) {
+          if (!leftDoor) {
+            setJumpscareAnimatronic('foxy');
+            setGameState('jumpscare');
+          } else {
+            sounds.playStepSound();
+            setPower(p => Math.max(0, p - 5));
+            foxy.atDoor = false;
+            foxy.chargeLevel = 0;
+            foxy.position = 'CAM_03';
+          }
+        } else if (Math.random() * 100 < chance) {
+          foxy.chargeLevel += 1;
+          if (foxy.chargeLevel >= 3) {
+            sounds.playStepSound();
+            foxy.atDoor = true;
+          }
+        }
+
+        return { ...prev, foxy };
+      });
+    }, currentNight === 6 ? 20000 : 30000);
+
+    return () => clearInterval(foxyLoopRef.current);
+  }, [gameState, currentNight, cameraOpen, leftDoor, powerOutage]);
+
+  const isAnimatronicAtLeftDoor = animatronics.bonnie.atDoor || animatronics.foxy.atDoor;
+  const isAnimatronicAtRightDoor = animatronics.freddy.atDoor || animatronics.chica.atDoor;
+
+  const handleJumpscareEnd = () => {
+    setGameState('menu');
+    setJumpscareAnimatronic(null);
+  };
+
+  const handleNightCompleteEnd = () => {
+    setGameState('menu');
+  };
+
+  return (
+    <div className="w-full h-screen bg-black overflow-hidden select-none">
+      <SoundManager gameState={gameState} powerOutage={powerOutage} />
+      <AmbientSounds isPlaying={gameState === 'playing'} />
+      <AnimatePresence mode="wait">
+        {gameState === 'menu' && (
+          <MainMenu
+            key="menu"
+            unlockedNights={unlockedNights}
+            onStartNight={startNight}
+            onContinue={() => startNight(Math.max(...unlockedNights))}
+          />
+        )}
+
+        {gameState === 'playing' && !cameraOpen && (
+          <Office
+            key="office"
+            power={power}
+            hour={Math.floor(hour)}
+            currentNight={currentNight}
+            leftDoor={leftDoor}
+            rightDoor={rightDoor}
+            leftLight={leftLight}
+            rightLight={rightLight}
+            goldenFreddyInRoom={goldenFreddyInRoom}
+            onToggleLeftDoor={() => {
+              if (!powerOutage) {
+                sounds.playDoorSound(!leftDoor);
+                setLeftDoor(!leftDoor);
+              }
+            }}
+            onToggleRightDoor={() => {
+              if (!powerOutage) {
+                sounds.playDoorSound(!rightDoor);
+                setRightDoor(!rightDoor);
+              }
+            }}
+            onToggleLeftLight={() => {
+              if (!powerOutage) {
+                sounds.playLightSound();
+                setLeftLight(!leftLight);
+              }
+            }}
+            onToggleRightLight={() => {
+              if (!powerOutage) {
+                sounds.playLightSound();
+                setRightLight(!rightLight);
+              }
+            }}
+            onOpenCamera={() => {
+              if (!powerOutage) {
+                sounds.playCameraSound(true);
+                setCameraOpen(true);
+                if (Math.random() < 1 / 32768) {
+                  setTimeout(() => {
+                    setJumpscareAnimatronic('goldenfreddy');
+                    setGameState('jumpscare');
+                  }, 500);
+                }
+              }
+            }}
+            isAnimatronicAtLeftDoor={isAnimatronicAtLeftDoor && leftLight}
+            isAnimatronicAtRightDoor={isAnimatronicAtRightDoor && rightLight}
+            animatronicAtLeft={animatronics.bonnie.atDoor ? 'bonnie' : animatronics.foxy.atDoor ? 'foxy' : null}
+            animatronicAtRight={animatronics.freddy.atDoor ? 'freddy' : animatronics.chica.atDoor ? 'chica' : null}
+            powerOutage={powerOutage}
+          />
+        )}
+
+        {gameState === 'playing' && cameraOpen && (
+          <CameraView
+            key="cameras"
+            power={power}
+            hour={Math.floor(hour)}
+            currentNight={currentNight}
+            cameras={CAMERA_LOCATIONS}
+            currentCamera={currentCamera}
+            onSelectCamera={(cam) => {
+              sounds.playCameraSound(false);
+              setCurrentCamera(cam);
+            }}
+            onCloseCamera={() => {
+              sounds.playCameraSound(false);
+              setCameraOpen(false);
+            }}
+            animatronics={animatronics}
+          />
+        )}
+
+        {gameState === 'jumpscare' && (
+          <Jumpscare
+            key="jumpscare"
+            animatronic={jumpscareAnimatronic}
+            onEnd={handleJumpscareEnd}
+          />
+        )}
+
+        {gameState === 'nightComplete' && (
+          <NightComplete
+            key="complete"
+            night={currentNight}
+            onContinue={handleNightCompleteEnd}
+          />
+        )}
+      </AnimatePresence>
+
+      {powerOutage && gameState === 'playing' && (
+        <PowerOutage />
+      )}
+    </div>
+  );
+}
